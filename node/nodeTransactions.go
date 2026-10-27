@@ -78,9 +78,8 @@ func (n *Node) TXPool(sender string, page int, pageSize int) ([]*api.Transaction
 		data, total = txsPool.GetPaginated("0", page, pageSize)
 	}
 
-	txs := make([]*api.Transaction, len(data))
-	var err error
-	for i, txObj := range data {
+	txs := make([]*api.Transaction, 0, len(data))
+	for _, txObj := range data {
 		if txObj == nil {
 			continue
 		}
@@ -88,10 +87,11 @@ func (n *Node) TXPool(sender string, page int, pageSize int) ([]*api.Transaction
 		if !ok || tx == nil {
 			continue
 		}
-		txs[i], err = n.prepareNormalTx(tx, api.TRANSACTION_STATUS_PENDING)
+		apiTx, err := n.prepareNormalTx(tx, api.TRANSACTION_STATUS_PENDING)
 		if err != nil {
 			continue
 		}
+		txs = append(txs, apiTx)
 	}
 
 	return txs, total, nil
