@@ -2667,13 +2667,15 @@ const docTemplatenode = `{
                     "type": "string"
                 },
                 "timestamp": {
-                    "$ref": "#/definitions/time.Duration"
+                    "type": "integer",
+                    "format": "int64"
                 },
                 "unfrozenBalance": {
                     "type": "integer"
                 },
                 "updatedAt": {
-                    "$ref": "#/definitions/time.Duration"
+                    "type": "integer",
+                    "format": "int64"
                 }
             }
         },
@@ -2733,7 +2735,8 @@ const docTemplatenode = `{
                     }
                 },
                 "timestamp": {
-                    "$ref": "#/definitions/time.Duration"
+                    "type": "integer",
+                    "format": "int64"
                 }
             }
         },
@@ -2901,7 +2904,8 @@ const docTemplatenode = `{
                     "type": "string"
                 },
                 "timestamp": {
-                    "$ref": "#/definitions/time.Duration"
+                    "type": "integer",
+                    "format": "int64"
                 },
                 "version": {
                     "type": "integer"
@@ -3782,30 +3786,6 @@ const docTemplatenode = `{
                     "type": "string"
                 }
             }
-        },
-        "time.Duration": {
-            "type": "integer",
-            "format": "int64",
-            "enum": [
-                -9223372036854775808,
-                9223372036854775807,
-                1,
-                1000,
-                1000000,
-                1000000000,
-                60000000000,
-                3600000000000
-            ],
-            "x-enum-varnames": [
-                "minDuration",
-                "maxDuration",
-                "Nanosecond",
-                "Microsecond",
-                "Millisecond",
-                "Second",
-                "Minute",
-                "Hour"
-            ]
         },
         "transaction.BroadcastTXRequest": {
             "type": "object",
