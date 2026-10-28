@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"slices"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/klever-io/klever-go/kvm/crypto/signing/secp256k1"
 	"github.com/klever-io/klever-go/kvm/executor"
 	"github.com/klever-io/klever-go/kvm/math"
@@ -607,13 +608,11 @@ func (context *VMHooksImpl) VerifyCustomSecp256k1(
 	if context.WithFault(err, runtime.CryptoAPIErrorShouldFailExecution()) {
 		return 1
 	}
-	// MemLoad truncates instead of failing when the range runs past the end of contract memory, so a
-	// plain message declared as 32 bytes can come back shorter, and the curve would zero-extend it: the
-	// short-message acceptance the length check above closes. From FixAuditChangesV6 that is an
-	// out-of-bounds fault, like the truncated signature header below
-	if plainMessage && context.GetVMHost().ForkController().FixAuditChangesV6() && len(message) != secp256k1PlainMessageLength {
-		_ = context.WithFault(vmhost.ErrBadBounds, runtime.CryptoAPIErrorShouldFailExecution())
-		return 1
+	if plainMessage {
+		err = checkSecp256k1PlainMessage(context.GetVMHost(), message)
+		if context.WithFault(err, runtime.CryptoAPIErrorShouldFailExecution()) {
+			return 1
+		}
 	}
 
 	// read the 2 leading bytes first
@@ -701,6 +700,13 @@ func ManagedVerifyCustomSecp256k1WithHost(
 		return 1
 	}
 
+	if isSecp256k1PlainMessage(hashType) {
+		err = checkSecp256k1PlainMessage(host, msgBytes)
+		if WithFaultAndHost(host, err, runtime.CryptoAPIErrorShouldFailExecution()) {
+			return 1
+		}
+	}
+
 	sigBytes, err := mBufferLoadDataCopy(host, sigHandle)
 	if WithFaultAndHost(host, err, runtime.ManagedBufferAPIErrorShouldFailExecution()) {
 		return 1
@@ -725,6 +731,24 @@ func ManagedVerifyCustomSecp256k1WithHost(
 func isSecp256k1PlainMessage(hashType int32) bool {
 	// #nosec G115
 	return secp256k1.MessageHashType(uint8(hashType)) == secp256k1.ECDSAPlainMsg
+}
+
+// checkSecp256k1PlainMessage rejects a plain message MemLoad truncated (FixAuditChangesV6) and, from
+// FixAuditChangesV7, one not below N, since the curve silently reduces it mod N
+func checkSecp256k1PlainMessage(host vmhost.VMHost, message []byte) error {
+	if host.ForkController().FixAuditChangesV6() && len(message) != secp256k1PlainMessageLength {
+		return vmhost.ErrBadBounds
+	}
+	if !host.ForkController().FixAuditChangesV7() {
+		return nil
+	}
+
+	var scalar btcec.ModNScalar
+	if scalar.SetByteSlice(message) {
+		return vmhost.ErrNonCanonicalSecp256k1PlainMessage
+	}
+
+	return nil
 }
 
 // VerifySecp256k1 VMHooks implementation.
