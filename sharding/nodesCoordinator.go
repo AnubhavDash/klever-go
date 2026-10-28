@@ -343,6 +343,13 @@ func (ihgs *indexHashedNodesCoordinator) registryToNodesCoordinator(
 }
 
 func epochValidatorsToEpochNodesConfig(config *EpochValidators) (*epochNodesConfig, error) {
+	// a registry entry can be present but null in the stored JSON ("5": null).
+	// LoadState walks every epoch, including ones createNodesCoordinator never
+	// sees, so fail here before the first field access.
+	if config == nil {
+		return nil, fmt.Errorf("nil registry epoch validators")
+	}
+
 	result := &epochNodesConfig{}
 	var err error
 
@@ -357,6 +364,13 @@ func epochValidatorsToEpochNodesConfig(config *EpochValidators) (*epochNodesConf
 	}
 
 	result.waitingList, err = serializableValidatorArrayToValidatorArray(config.WaitingValidators)
+	if err != nil {
+		return nil, err
+	}
+
+	// registries saved before the leaving list was persisted have no
+	// LeavingValidators field; the list stays empty until the next epoch start
+	result.leavingList, err = serializableValidatorArrayToValidatorArray(config.LeavingValidators)
 	if err != nil {
 		return nil, err
 	}
@@ -606,60 +620,44 @@ func displayValidatorsForRandomness(validators []Validator, randomness []byte, s
 
 // GetAllElectedValidatorsKeys will return all validators elected public keys
 func (ihgs *indexHashedNodesCoordinator) GetAllElectedValidatorsKeys(epoch uint32, ownerKey bool) ([][]byte, error) {
-	validatorsPubKeys := make([][]byte, 0)
-
-	ihgs.mutNodesConfig.RLock()
-	nodesConfig, ok := ihgs.nodesConfig[epoch]
-	ihgs.mutNodesConfig.RUnlock()
-
-	if !ok {
-		return nil, fmt.Errorf("%w epoch=%v", ErrEpochNodesConfigDoesNotExist, epoch)
-	}
-
-	nodesConfig.mutNodesMaps.RLock()
-	defer nodesConfig.mutNodesMaps.RUnlock()
-
-	for i := 0; i < len(nodesConfig.electedList); i++ {
-		if ownerKey {
-			validatorsPubKeys = append(validatorsPubKeys, nodesConfig.electedList[i].OwnerAddress())
-		} else {
-			validatorsPubKeys = append(validatorsPubKeys, nodesConfig.electedList[i].PubKey())
-		}
-	}
-
-	return validatorsPubKeys, nil
+	return ihgs.getAllValidatorsKeys(epoch, ownerKey, func(nodesConfig *epochNodesConfig) []Validator {
+		return nodesConfig.electedList
+	})
 }
 
-// GetAllEligibleValidatorsPubGetAllEligibleValidatorsKeyslicKeys will return all validators public keys for all shards
+// GetAllEligibleValidatorsKeys will return all eligible validators public keys
 func (ihgs *indexHashedNodesCoordinator) GetAllEligibleValidatorsKeys(epoch uint32, ownerKey bool) ([][]byte, error) {
-	validatorsPubKeys := make([][]byte, 0)
-
-	ihgs.mutNodesConfig.RLock()
-	nodesConfig, ok := ihgs.nodesConfig[epoch]
-	ihgs.mutNodesConfig.RUnlock()
-
-	if !ok {
-		return nil, fmt.Errorf("%w epoch=%v", ErrEpochNodesConfigDoesNotExist, epoch)
-	}
-
-	nodesConfig.mutNodesMaps.RLock()
-	defer nodesConfig.mutNodesMaps.RUnlock()
-
-	for i := 0; i < len(nodesConfig.eligibleList); i++ {
-		if ownerKey {
-			validatorsPubKeys = append(validatorsPubKeys, nodesConfig.eligibleList[i].OwnerAddress())
-		} else {
-			validatorsPubKeys = append(validatorsPubKeys, nodesConfig.eligibleList[i].PubKey())
-		}
-	}
-
-	return validatorsPubKeys, nil
+	return ihgs.getAllValidatorsKeys(epoch, ownerKey, func(nodesConfig *epochNodesConfig) []Validator {
+		return nodesConfig.eligibleList
+	})
 }
 
-// GetAllWaitingValidatorsKeys will return all validators public keys for all shards
+// GetAllWaitingValidatorsKeys will return all waiting validators public keys
 func (ihgs *indexHashedNodesCoordinator) GetAllWaitingValidatorsKeys(epoch uint32, ownerKey bool) ([][]byte, error) {
-	validatorsPubKeys := make([][]byte, 0)
+	return ihgs.getAllValidatorsKeys(epoch, ownerKey, func(nodesConfig *epochNodesConfig) []Validator {
+		return nodesConfig.waitingList
+	})
+}
 
+// GetAllLeavingValidatorsKeys will return all leaving validators public keys.
+// The leaving list is populated by computeNodesConfigFromList from validators
+// whose list is jailed, minus the ones promoted back to eligible to fill the
+// consensus size.
+func (ihgs *indexHashedNodesCoordinator) GetAllLeavingValidatorsKeys(epoch uint32, ownerKey bool) ([][]byte, error) {
+	return ihgs.getAllValidatorsKeys(epoch, ownerKey, func(nodesConfig *epochNodesConfig) []Validator {
+		return nodesConfig.leavingList
+	})
+}
+
+// getAllValidatorsKeys returns the public keys (or owner addresses) of one of
+// the epoch's validator lists, selected by pickList. It is the single
+// implementation behind the GetAllXValidatorsKeys getters, so the epoch lookup
+// and the locking discipline live in one place.
+func (ihgs *indexHashedNodesCoordinator) getAllValidatorsKeys(
+	epoch uint32,
+	ownerKey bool,
+	pickList func(nodesConfig *epochNodesConfig) []Validator,
+) ([][]byte, error) {
 	ihgs.mutNodesConfig.RLock()
 	nodesConfig, ok := ihgs.nodesConfig[epoch]
 	ihgs.mutNodesConfig.RUnlock()
@@ -671,11 +669,13 @@ func (ihgs *indexHashedNodesCoordinator) GetAllWaitingValidatorsKeys(epoch uint3
 	nodesConfig.mutNodesMaps.RLock()
 	defer nodesConfig.mutNodesMaps.RUnlock()
 
-	for i := 0; i < len(nodesConfig.waitingList); i++ {
+	list := pickList(nodesConfig)
+	validatorsPubKeys := make([][]byte, 0, len(list))
+	for _, validator := range list {
 		if ownerKey {
-			validatorsPubKeys = append(validatorsPubKeys, nodesConfig.waitingList[i].OwnerAddress())
+			validatorsPubKeys = append(validatorsPubKeys, validator.OwnerAddress())
 		} else {
-			validatorsPubKeys = append(validatorsPubKeys, nodesConfig.waitingList[i].PubKey())
+			validatorsPubKeys = append(validatorsPubKeys, validator.PubKey())
 		}
 	}
 
@@ -788,7 +788,7 @@ func (ihgs *indexHashedNodesCoordinator) EpochStartPrepare(metaHdr data.HeaderHa
 		return
 	}
 
-	err = ihgs.SetNodes(resUpdateNodes.Elected, resUpdateNodes.Eligible, newNodesConfig.waitingList, newEpoch)
+	err = ihgs.SetNodes(resUpdateNodes.Elected, resUpdateNodes.Eligible, newNodesConfig.waitingList, newNodesConfig.leavingList, newEpoch)
 	if err != nil {
 		log.Error("set nodes per shard failed", "error", err.Error())
 	}
@@ -826,6 +826,7 @@ func (ihgs *indexHashedNodesCoordinator) SetNodes(
 	elected []Validator,
 	eligible []Validator,
 	waiting []Validator,
+	leaving []Validator,
 	epoch uint32,
 ) error {
 	ihgs.mutNodesConfig.Lock()
@@ -849,6 +850,7 @@ func (ihgs *indexHashedNodesCoordinator) SetNodes(
 	nodesConfig.electedList = elected
 	nodesConfig.eligibleList = eligible
 	nodesConfig.waitingList = waiting
+	nodesConfig.leavingList = leaving
 	nodesConfig.selector, err = ihgs.createSelector(nodesConfig)
 	if err != nil {
 		return err

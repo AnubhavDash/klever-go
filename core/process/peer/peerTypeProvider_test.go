@@ -13,9 +13,68 @@ import (
 	"github.com/klever-io/klever-go/data/block"
 	"github.com/klever-io/klever-go/data/state"
 	"github.com/klever-io/klever-go/eventNotifier"
+	"github.com/klever-io/klever-go/sharding"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type legacyNodesCoordinator struct{}
+
+func (lnc *legacyNodesCoordinator) ComputeConsensusGroup([]byte, uint64, uint32) ([]sharding.Validator, error) {
+	return nil, nil
+}
+
+func (lnc *legacyNodesCoordinator) GetValidatorWithPublicKey([]byte) (sharding.Validator, error) {
+	return nil, nil
+}
+
+func (lnc *legacyNodesCoordinator) ConsensusGroupSize() int {
+	return 1
+}
+
+func (lnc *legacyNodesCoordinator) LoadState([]byte) error {
+	return nil
+}
+
+func (lnc *legacyNodesCoordinator) GetSavedStateKey() []byte {
+	return nil
+}
+
+func (lnc *legacyNodesCoordinator) GetOwnPublicKey() []byte {
+	return nil
+}
+
+func (lnc *legacyNodesCoordinator) GetConsensusWhitelistedNodes(uint32) (map[string]struct{}, error) {
+	return nil, nil
+}
+
+func (lnc *legacyNodesCoordinator) GetAllElectedValidatorsKeys(uint32, bool) ([][]byte, error) {
+	return [][]byte{[]byte("elected")}, nil
+}
+
+func (lnc *legacyNodesCoordinator) GetAllEligibleValidatorsKeys(uint32, bool) ([][]byte, error) {
+	return nil, nil
+}
+
+func (lnc *legacyNodesCoordinator) GetAllWaitingValidatorsKeys(uint32, bool) ([][]byte, error) {
+	return nil, nil
+}
+
+func (lnc *legacyNodesCoordinator) SetEpochValidatorsInfo(uint32, []*state.ValidatorInfo) error {
+	return nil
+}
+
+func (lnc *legacyNodesCoordinator) CheckValidatorSlot(uint32, int64, []byte) bool {
+	return false
+}
+
+func (lnc *legacyNodesCoordinator) GetConsensusValidatorsPublicKeys([]byte, uint64, uint32) ([]string, error) {
+	return nil, nil
+}
+
+func (lnc *legacyNodesCoordinator) IsInterfaceNil() bool {
+	return lnc == nil
+}
 
 func TestNewPeerTypeProvider_NilNodesCoordinator(t *testing.T) {
 	arg := createDefaultArgPeerTypeProvider()
@@ -41,6 +100,20 @@ func TestNewPeerTypeProvider_ShouldWork(t *testing.T) {
 	ptp, err := NewPeerTypeProvider(arg)
 	assert.Nil(t, err)
 	assert.NotNil(t, ptp)
+}
+
+func TestNewPeerTypeProvider_AcceptsCoordinatorWithoutLeavingCapability(t *testing.T) {
+	t.Parallel()
+
+	arg := createDefaultArgPeerTypeProvider()
+	arg.NodesCoordinator = &legacyNodesCoordinator{}
+
+	ptp, err := NewPeerTypeProvider(arg)
+
+	require.NoError(t, err)
+	peerType, _, err := ptp.ComputeForPubKey([]byte("elected"))
+	require.NoError(t, err)
+	assert.Equal(t, core.ElectedList, peerType)
 }
 
 func TestPeerTypeProvider_CallsPopulateAndRegister(t *testing.T) {
@@ -267,6 +340,9 @@ func TestPeerTypeProvider_CreateNewCacheScenarios(t *testing.T) {
 	arg := createDefaultArgPeerTypeProvider()
 
 	arg.NodesCoordinator = &mock.NodesCoordinatorMock{
+		GetAllLeavingValidatorsKeysCalled: func() ([][]byte, error) {
+			return [][]byte{[]byte("jailed1"), []byte("elected1")}, nil
+		},
 		GetAllElectedValidatorsKeysCalled: func() ([][]byte, error) {
 			return [][]byte{[]byte("elected1"), []byte("elected2")}, nil
 		},
@@ -278,10 +354,14 @@ func TestPeerTypeProvider_CreateNewCacheScenarios(t *testing.T) {
 
 	cache, ok := ptp.createNewCache(0)
 	require.True(t, ok)
-	require.Len(t, cache, 3)
-	assert.Equal(t, core.EligibleList, cache["elected1"].pType) // elected1 is also eligible as it have been updated in the eligible list
+	require.Len(t, cache, 4)
+	// elected1 is in the leaving, elected and eligible lists: leaving is seeded
+	// first, so the working lists win and the last one seeded (eligible) sticks
+	assert.Equal(t, core.EligibleList, cache["elected1"].pType)
 	assert.Equal(t, core.ElectedList, cache["elected2"].pType)
 	assert.Equal(t, core.EligibleList, cache["eligible1"].pType)
+	// jailed1 appears only in the leaving list, so it stays jailed
+	assert.Equal(t, core.JailedList, cache["jailed1"].pType)
 }
 
 func TestPeerTypeProvider_GetAllPeerTypeInfos(t *testing.T) {
@@ -326,6 +406,9 @@ func TestPeerTypeProvider_UpdateCache_KeepsPreviousOnFailure(t *testing.T) {
 
 	arg := createDefaultArgPeerTypeProvider()
 	arg.NodesCoordinator = &mock.NodesCoordinatorMock{
+		GetAllLeavingValidatorsKeysCalled: func() ([][]byte, error) {
+			return [][]byte{[]byte("jailed1")}, nil
+		},
 		GetAllWaitingValidatorsKeysCalled: func() ([][]byte, error) {
 			return [][]byte{[]byte("waiting1")}, nil
 		},
@@ -344,7 +427,7 @@ func TestPeerTypeProvider_UpdateCache_KeepsPreviousOnFailure(t *testing.T) {
 	}
 
 	ptp.UpdateCache(0)
-	require.Len(t, ptp.cache, 3)
+	require.Len(t, ptp.cache, 4)
 
 	ptp.nodesCoordinator = &mock.NodesCoordinatorMock{
 		GetAllWaitingValidatorsKeysCalled: func() ([][]byte, error) {
@@ -354,10 +437,12 @@ func TestPeerTypeProvider_UpdateCache_KeepsPreviousOnFailure(t *testing.T) {
 
 	ptp.UpdateCache(99)
 
-	require.Len(t, ptp.cache, 3)
+	require.Len(t, ptp.cache, 4)
+	require.Contains(t, ptp.cache, "jailed1")
 	require.Contains(t, ptp.cache, "waiting1")
 	require.Contains(t, ptp.cache, "elected1")
 	require.Contains(t, ptp.cache, "eligible1")
+	assert.Equal(t, core.JailedList, ptp.cache["jailed1"].pType)
 	assert.Equal(t, core.WaitingList, ptp.cache["waiting1"].pType)
 	assert.Equal(t, core.ElectedList, ptp.cache["elected1"].pType)
 	assert.Equal(t, core.EligibleList, ptp.cache["eligible1"].pType)
@@ -378,8 +463,18 @@ func TestPeerTypeProvider_CreateNewCache_FailsOnAnyGetterError(t *testing.T) {
 		coordinator *mock.NodesCoordinatorMock
 	}{
 		{
+			name: "leaving getter fails",
+			coordinator: &mock.NodesCoordinatorMock{
+				GetAllLeavingValidatorsKeysCalled:  failingGetter,
+				GetAllWaitingValidatorsKeysCalled:  okGetter,
+				GetAllElectedValidatorsKeysCalled:  okGetter,
+				GetAllEligibleValidatorsKeysCalled: okGetter,
+			},
+		},
+		{
 			name: "waiting getter fails",
 			coordinator: &mock.NodesCoordinatorMock{
+				GetAllLeavingValidatorsKeysCalled:  okGetter,
 				GetAllWaitingValidatorsKeysCalled:  failingGetter,
 				GetAllElectedValidatorsKeysCalled:  okGetter,
 				GetAllEligibleValidatorsKeysCalled: okGetter,
@@ -388,6 +483,7 @@ func TestPeerTypeProvider_CreateNewCache_FailsOnAnyGetterError(t *testing.T) {
 		{
 			name: "elected getter fails",
 			coordinator: &mock.NodesCoordinatorMock{
+				GetAllLeavingValidatorsKeysCalled:  okGetter,
 				GetAllWaitingValidatorsKeysCalled:  okGetter,
 				GetAllElectedValidatorsKeysCalled:  failingGetter,
 				GetAllEligibleValidatorsKeysCalled: okGetter,
@@ -396,6 +492,7 @@ func TestPeerTypeProvider_CreateNewCache_FailsOnAnyGetterError(t *testing.T) {
 		{
 			name: "eligible getter fails",
 			coordinator: &mock.NodesCoordinatorMock{
+				GetAllLeavingValidatorsKeysCalled:  okGetter,
 				GetAllWaitingValidatorsKeysCalled:  okGetter,
 				GetAllElectedValidatorsKeysCalled:  okGetter,
 				GetAllEligibleValidatorsKeysCalled: failingGetter,
@@ -424,6 +521,9 @@ func TestPeerTypeProvider_ComputeForPubKey_PartitionScenarios(t *testing.T) {
 
 	arg := createDefaultArgPeerTypeProvider()
 	arg.NodesCoordinator = &mock.NodesCoordinatorMock{
+		GetAllLeavingValidatorsKeysCalled: func() ([][]byte, error) {
+			return [][]byte{[]byte("jailed1")}, nil
+		},
 		GetAllWaitingValidatorsKeysCalled: func() ([][]byte, error) {
 			return [][]byte{[]byte("waiting1")}, nil
 		},
@@ -438,14 +538,16 @@ func TestPeerTypeProvider_ComputeForPubKey_PartitionScenarios(t *testing.T) {
 	ptp, err := NewPeerTypeProvider(arg)
 	require.Nil(t, err)
 
-	// a key can only be in one of the three lists in production
-	// (computeNodesConfigFromList partitions on validatorInfo.List),
+	// a key can only be in one of the four lists in production
+	// (computeNodesConfigFromList partitions on validatorInfo.List and the
+	// numToStay promotion removes promoted keys from the leaving list),
 	// so the scenarios cover the partition, not overlap states
 	testCases := []struct {
 		name         string
 		pubKey       string
 		expectedType core.PeerType
 	}{
+		{name: "key in leaving list resolves to jailed", pubKey: "jailed1", expectedType: core.JailedList},
 		{name: "key in waiting list resolves to waiting", pubKey: "waiting1", expectedType: core.WaitingList},
 		{name: "key in elected list resolves to elected", pubKey: "elected1", expectedType: core.ElectedList},
 		{name: "key in eligible list resolves to eligible", pubKey: "eligible1", expectedType: core.EligibleList},
