@@ -637,7 +637,10 @@ func (v *validatorsKApp) loadAndCheckRotationTarget(ctx kapp.KappContext, sender
 }
 
 // initRotatedPeerAccount sets the BLS key on a peer account seen for the first time and,
-// from FixStakingBuckets on, carries the old peer's state over, jailing it if elected
+// from FixStakingBuckets on, carries the old peer's state over, jailing it if elected.
+// From FixAuditChangesV7 the copied epoch fees and counters are cleared on the old peer.
+// Epoch end does not pay that key. The clear keeps a sum over every peer from counting
+// the snapshot twice, and it drops this epoch's stats from the revoked key.
 func (v *validatorsKApp) initRotatedPeerAccount(peerAcc, peerAccOld state.PeerAccountHandler, newKey []byte) error {
 	if bytes.Equal(peerAcc.GetBLSPublicKey(), newKey) {
 		return nil
@@ -656,6 +659,16 @@ func (v *validatorsKApp) initRotatedPeerAccount(peerAcc, peerAccOld state.PeerAc
 	err = peerAcc.CopyFrom(peerAccOld)
 	if err != nil {
 		return err
+	}
+
+	// the copy leaves the snapshot on both keys; drop it from the revoked key, which epoch end
+	// does not pay, and only after the copy has succeeded
+	if v.forkController.FixAuditChangesV7() {
+		peerAccOld.ClearEpochAccounting()
+		err = v.accountsCacher.UpdatePeer(peerAccOld)
+		if err != nil {
+			return err
+		}
 	}
 
 	if peerAcc.GetList() == state.List_elected {
